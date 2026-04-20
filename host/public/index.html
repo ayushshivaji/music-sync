@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>music-sync — host</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+      margin: 0; padding: 2rem; max-width: 720px; margin-inline: auto;
+      line-height: 1.4;
+    }
+    h1 { margin-top: 0; font-weight: 600; letter-spacing: -0.02em; }
+    .dropzone {
+      border: 2px dashed currentColor; border-radius: 12px;
+      padding: 2rem; text-align: center; opacity: .6; cursor: pointer;
+      transition: opacity .15s, background .15s;
+    }
+    .dropzone.hover { opacity: 1; background: rgba(128,128,128,.08); }
+    .dropzone input { display: none; }
+    .track { margin: 1rem 0; padding: .75rem 1rem; border-radius: 8px; background: rgba(128,128,128,.1); }
+    .controls { display: flex; gap: .5rem; margin: 1rem 0; align-items: center; }
+    button {
+      font: inherit; padding: .4rem .9rem; border-radius: 6px; border: 1px solid currentColor;
+      background: transparent; cursor: pointer;
+    }
+    button:disabled { opacity: .4; cursor: not-allowed; }
+    progress { flex: 1; height: 8px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
+    th, td { text-align: left; padding: .4rem .5rem; border-bottom: 1px solid rgba(128,128,128,.3); }
+    select, input[type=text] { font: inherit; padding: .2rem .4rem; }
+    .empty { opacity: .6; padding: 1rem; text-align: center; }
+    .pos { font-variant-numeric: tabular-nums; opacity: .8; font-size: .9em; }
+    .err { color: #c33; white-space: pre-wrap; font-family: monospace; font-size: .85em; }
+  </style>
+</head>
+<body>
+  <h1>music-sync · host</h1>
+
+  <label class="dropzone" id="drop">
+    <input type="file" id="file" accept="audio/*" />
+    <div><strong>Drop an audio file</strong> or click to pick one</div>
+    <div class="pos">mp3, wav, flac, m4a, ogg — anything ffmpeg can decode</div>
+  </label>
+
+  <div class="track" id="track">
+    <div id="track-name" class="pos">No track loaded</div>
+    <div class="controls">
+      <button id="play">Play</button>
+      <button id="pause">Pause</button>
+      <progress id="progress" value="0" max="1"></progress>
+      <span class="pos" id="time">0:00 / 0:00</span>
+    </div>
+  </div>
+
+  <h2 style="font-size: 1.1em">Connected clients</h2>
+  <table id="clients">
+    <thead>
+      <tr><th>Name</th><th>Channel</th><th>Addr</th><th>Late</th></tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+  <div class="empty" id="empty">No clients yet. Open <code>/client</code> on another Mac.</div>
+
+  <div id="err" class="err"></div>
+  <script src="/host-ui.js"></script>
+</body>
+</html>

@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>music-sync — client</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+      margin: 0; padding: 2rem; max-width: 520px; margin-inline: auto;
+      line-height: 1.5;
+    }
+    h1 { margin-top: 0; font-weight: 600; letter-spacing: -0.02em; }
+    .card { padding: 1rem 1.25rem; border-radius: 10px; background: rgba(128,128,128,.1); margin: 1rem 0; }
+    .row { display: flex; justify-content: space-between; align-items: center; gap: 1rem; }
+    .row + .row { margin-top: .5rem; }
+    button {
+      font: inherit; padding: .5rem 1rem; border-radius: 6px; border: 1px solid currentColor;
+      background: transparent; cursor: pointer;
+    }
+    input[type=text] { font: inherit; padding: .3rem .5rem; }
+    .pos { font-variant-numeric: tabular-nums; opacity: .8; }
+    .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: #aaa; vertical-align: baseline; }
+    .dot.ok { background: #3a3; }
+    .dot.warn { background: #c93; }
+    .dot.bad { background: #c33; }
+  </style>
+</head>
+<body>
+  <h1>music-sync · client</h1>
+
+  <div class="card" id="join-card">
+    <p>This tab will play audio sent from the host. Pick a name so you can find it in the host UI.</p>
+    <div class="row">
+      <input type="text" id="name" placeholder="e.g. kitchen mac" autocomplete="off" />
+      <button id="join">Join</button>
+    </div>
+  </div>
+
+  <div class="card" id="status-card" style="display:none">
+    <div class="row"><span>Status</span> <span><span class="dot" id="dot"></span> <span id="status">connecting…</span></span></div>
+    <div class="row"><span>Channel</span> <span id="channel" class="pos">—</span></div>
+    <div class="row"><span>Clock offset</span> <span id="offset" class="pos">measuring…</span></div>
+    <div class="row"><span>RTT</span> <span id="rtt" class="pos">—</span></div>
+    <div class="row"><span>Late frames</span> <span id="late" class="pos">0</span></div>
+  </div>
+
+  <script type="module" src="/client/client.js"></script>
+</body>
+</html>

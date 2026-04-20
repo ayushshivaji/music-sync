@@ -1,0 +1,169 @@
+import { ClockSync } from "./clock.js";
+
+const FRAME_MAGIC = 0x53594e43;
+const HEADER_BYTES = 32;
+const SCHEDULE_SAFETY_SEC = 0.02;
+
+const $ = (id) => document.getElementById(id);
+
+const nameInput = $("name");
+const joinBtn = $("join");
+const joinCard = $("join-card");
+const statusCard = $("status-card");
+const statusEl = $("status");
+const dotEl = $("dot");
+const channelEl = $("channel");
+const offsetEl = $("offset");
+const rttEl = $("rtt");
+const lateEl = $("late");
+
+nameInput.value = guessName();
+
+function guessName() {
+  const ua = navigator.userAgent;
+  if (ua.includes("Macintosh")) return `mac-${Math.random().toString(36).slice(2, 5)}`;
+  return `client-${Math.random().toString(36).slice(2, 5)}`;
+}
+
+joinBtn.addEventListener("click", start);
+nameInput.addEventListener("keydown", (e) => { if (e.key === "Enter") start(); });
+
+let ctx = null;
+let ws = null;
+let clock = null;
+let channel = "mono";
+let framesLate = 0;
+let framesPlayed = 0;
+let pingTimer = null;
+let currentEpoch = 0;
+let scheduledNodes = [];
+
+async function start() {
+  if (ctx) return;
+  ctx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: "playback" });
+  if (ctx.state === "suspended") await ctx.resume();
+  clock = new ClockSync(ctx);
+  clock.onChange(renderStatus);
+  joinCard.style.display = "none";
+  statusCard.style.display = "";
+  connect();
+}
+
+function connect() {
+  setStatus("connecting", "warn");
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  ws = new WebSocket(`${proto}//${location.host}/ws`);
+  ws.binaryType = "arraybuffer";
+  ws.addEventListener("open", () => {
+    setStatus("connected", "ok");
+    send({ type: "announce", name: nameInput.value || "client" });
+    // burst of pings at connect, then periodic
+    for (let i = 0; i < 10; i++) setTimeout(ping, i * 40);
+    pingTimer = setInterval(ping, 5000);
+  });
+  ws.addEventListener("message", (e) => {
+    if (typeof e.data === "string") handleJson(JSON.parse(e.data));
+    else handleBinary(e.data);
+  });
+  ws.addEventListener("close", () => {
+    setStatus("reconnecting", "warn");
+    clearInterval(pingTimer);
+    cancelScheduled();
+    setTimeout(connect, 500);
+  });
+  ws.addEventListener("error", () => setStatus("error", "bad"));
+}
+
+function send(obj) {
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+}
+
+function ping() {
+  if (!clock) return;
+  const t0 = clock.nowNs();
+  send({ type: "ping", t0: Number(t0) });
+}
+
+function handleJson(msg) {
+  if (msg.type === "hello") {
+    // clientId available in msg.clientId; not currently displayed
+  } else if (msg.type === "pong") {
+    clock.handlePong(msg.t0, msg.t1);
+  } else if (msg.type === "assign") {
+    channel = msg.channel;
+    renderStatus();
+  } else if (msg.type === "transport") {
+    if (typeof msg.epoch === "number" && msg.epoch !== currentEpoch) {
+      currentEpoch = msg.epoch;
+      cancelScheduled();
+    }
+    if (msg.state !== "playing") cancelScheduled();
+  }
+}
+
+function handleBinary(buf) {
+  if (!(buf instanceof ArrayBuffer) || buf.byteLength < HEADER_BYTES) return;
+  const dv = new DataView(buf);
+  const magic = dv.getUint32(0, true);
+  if (magic !== FRAME_MAGIC) return;
+  const sampleRate = dv.getUint32(8, true);
+  const numSamples = dv.getUint32(12, true);
+  const playAtHostNs = dv.getBigInt64(20, true);
+  const pcm = new Int16Array(buf, HEADER_BYTES, numSamples);
+
+  const audioTime = clock.hostNsToAudioTime(playAtHostNs);
+  if (audioTime === null) {
+    // not clock-synced yet → play immediately, inherently loose for the first few frames
+    schedulePcm(pcm, sampleRate, ctx.currentTime + 0.05);
+    return;
+  }
+  const deadline = ctx.currentTime + SCHEDULE_SAFETY_SEC;
+  if (audioTime < deadline) {
+    framesLate++;
+    send({ type: "late", count: framesLate });
+    renderStatus();
+    return;
+  }
+  schedulePcm(pcm, sampleRate, audioTime);
+}
+
+function schedulePcm(pcmInt16, sampleRate, when) {
+  const buf = ctx.createBuffer(1, pcmInt16.length, sampleRate);
+  const ch = buf.getChannelData(0);
+  for (let i = 0; i < pcmInt16.length; i++) ch[i] = pcmInt16[i] / 32768;
+  const src = ctx.createBufferSource();
+  src.buffer = buf;
+  src.connect(ctx.destination);
+  src.onended = () => {
+    const idx = scheduledNodes.indexOf(src);
+    if (idx >= 0) scheduledNodes.splice(idx, 1);
+  };
+  try {
+    src.start(when);
+    scheduledNodes.push(src);
+    framesPlayed++;
+  } catch {
+    /* happens if `when` is already past; drop silently */
+  }
+}
+
+function cancelScheduled() {
+  for (const n of scheduledNodes) {
+    try { n.stop(); } catch { /* already stopped */ }
+  }
+  scheduledNodes = [];
+}
+
+function setStatus(text, level) {
+  statusEl.textContent = text;
+  dotEl.className = `dot ${level ?? ""}`;
+}
+
+function renderStatus() {
+  channelEl.textContent = channel;
+  const off = clock?.offsetMs();
+  const rtt = clock?.rttMs();
+  offsetEl.textContent = off === null || off === undefined ? "measuring…" : `${off.toFixed(2)} ms`;
+  rttEl.textContent = rtt === null || rtt === undefined ? "—" : `${rtt.toFixed(2)} ms`;
+  lateEl.textContent = String(framesLate);
+}
