@@ -30,7 +30,7 @@ The hard problem is **clock-offset estimation**, not audio transport. Solved via
        Web Audio scheduled playback
 ```
 
-Clients are **browser tabs** — no install, no native app. You visit `http://<host>.local:7000` on each Mac and assign it a channel in the host UI. This is the single biggest simplification; Web Audio is good enough for the 20ms target.
+Clients are **browser tabs** — no install, no native app. You visit `http://<host>.local:7500` on each Mac and assign it a channel in the host UI. This is the single biggest simplification; Web Audio is good enough for the 20ms target.
 
 ## Components
 
@@ -72,7 +72,7 @@ Standard NTP-lite, runs on the same WebSocket as audio:
 This alone gets us well under 20ms on a quiet LAN. Move to EWMA / Cristian's algorithm only if drift appears.
 
 ### 4. Discovery
-- **v1: manual.** Host prints `Open http://<your-ip>:7000 on each Mac` on stdout. Macs on Bonjour can usually just use `http://<hostname>.local:7000`.
+- **v1: manual.** Host prints `Open http://<your-ip>:7500 on each Mac` on stdout. Macs on Bonjour can usually just use `http://<hostname>.local:7500`.
 - **v2:** advertise via `mdns` npm package. Not MVP-critical.
 
 ### 5. Transport
@@ -162,7 +162,7 @@ type ClientMsg =
 
 ## Verification
 
-- **Functional:** `npm start` on host Mac, open `http://<host>.local:7000/client` on another Mac, load a file, assign channels, hit play → audio comes out of both.
+- **Functional:** `npm start` on host Mac, open `http://<host>.local:7500/client` on another Mac, load a file, assign channels, hit play → audio comes out of both.
 - **Sync quality:** place both Macs ~30cm apart. Record with phone voice-memo. Open the wav in Audacity, look at transient alignment on a percussive track. Expect <20ms skew; >50ms means something is wrong with clock sync.
 - **Stress:** add a third client, rapidly reassign channels, seek repeatedly. No audible glitching for >60s.
 - **Late-frame telemetry:** client logs `framesLate` count; host UI shows it. Should be 0 on a quiet network.

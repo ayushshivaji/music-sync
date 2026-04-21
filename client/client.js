@@ -13,8 +13,10 @@ const statusCard = $("status-card");
 const statusEl = $("status");
 const dotEl = $("dot");
 const channelEl = $("channel");
-const offsetEl = $("offset");
 const rttEl = $("rtt");
+const driftEl = $("drift");
+const residualEl = $("residual");
+const samplesEl = $("samples");
 const lateEl = $("late");
 
 nameInput.value = guessName();
@@ -57,9 +59,10 @@ function connect() {
   ws.addEventListener("open", () => {
     setStatus("connected", "ok");
     send({ type: "announce", name: nameInput.value || "client" });
-    // burst of pings at connect, then periodic
+    // Startup burst — fills the regression window quickly with low-RTT samples.
     for (let i = 0; i < 10; i++) setTimeout(ping, i * 40);
-    pingTimer = setInterval(ping, 5000);
+    // Then steady cadence spread over ~2 min for a clean drift slope.
+    pingTimer = setInterval(ping, 3000);
   });
   ws.addEventListener("message", (e) => {
     if (typeof e.data === "string") handleJson(JSON.parse(e.data));
@@ -69,6 +72,7 @@ function connect() {
     setStatus("reconnecting", "warn");
     clearInterval(pingTimer);
     cancelScheduled();
+    clock.reset();
     setTimeout(connect, 500);
   });
   ws.addEventListener("error", () => setStatus("error", "bad"));
@@ -161,9 +165,17 @@ function setStatus(text, level) {
 
 function renderStatus() {
   channelEl.textContent = channel;
-  const off = clock?.offsetMs();
   const rtt = clock?.rttMs();
-  offsetEl.textContent = off === null || off === undefined ? "measuring…" : `${off.toFixed(2)} ms`;
-  rttEl.textContent = rtt === null || rtt === undefined ? "—" : `${rtt.toFixed(2)} ms`;
+  const drift = clock?.driftPpm();
+  const residual = clock?.residualMsLatest();
+  const n = clock?.sampleCount() ?? 0;
+  rttEl.textContent = rtt === null || rtt === undefined ? "measuring…" : `${rtt.toFixed(2)} ms`;
+  driftEl.textContent = drift === null || drift === undefined
+    ? "—"
+    : `${drift >= 0 ? "+" : ""}${drift.toFixed(1)} ppm`;
+  residualEl.textContent = residual === null || residual === undefined
+    ? "—"
+    : `${residual.toFixed(2)} ms`;
+  samplesEl.textContent = String(n);
   lateEl.textContent = String(framesLate);
 }

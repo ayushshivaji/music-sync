@@ -1,0 +1,8 @@
+node_modules
+.git
+.DS_Store
+*.log
+tmp-uploads
+/Users
+design.md
+README.md

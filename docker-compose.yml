@@ -1,0 +1,23 @@
+# Dev/test:  docker compose up --build
+# Prod:      docker compose up -d --build
+#
+# On Linux, prefer `network_mode: host` so clients can reach this via
+# <host>.local and LAN discovery works transparently. Docker Desktop
+# on macOS/Windows does not support host networking — port mapping is
+# required there (the default below).
+
+services:
+  music-sync:
+    build: .
+    container_name: music-sync
+    restart: unless-stopped
+    ports:
+      - "7500:7500"
+    # network_mode: host   # Linux only; also comment out `ports:` above
+    volumes:
+      - uploads:/tmp/music-sync-uploads
+    environment:
+      - PORT=7500
+
+volumes:
+  uploads:

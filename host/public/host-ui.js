@@ -94,7 +94,6 @@ async function uploadFile(file) {
   }
 }
 
-drop.addEventListener("click", () => fileInput.click());
 fileInput.addEventListener("change", () => {
   if (fileInput.files && fileInput.files[0]) uploadFile(fileInput.files[0]);
 });

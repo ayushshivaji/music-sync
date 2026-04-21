@@ -25,13 +25,28 @@ export async function decodeFileToPcm(
       "-ac", "2",
       "-",
     ];
+    console.log(`[ffmpeg] spawn: ffmpeg ${args.join(" ")}`);
     const ff = spawn("ffmpeg", args, { stdio: ["ignore", "pipe", "pipe"] });
     const chunks: Buffer[] = [];
     let stderr = "";
-    ff.stdout.on("data", (b: Buffer) => chunks.push(b));
-    ff.stderr.on("data", (b: Buffer) => { stderr += b.toString("utf8"); });
-    ff.on("error", reject);
+    let bytesOut = 0;
+    ff.stdout.on("data", (b: Buffer) => {
+      chunks.push(b);
+      bytesOut += b.byteLength;
+    });
+    ff.stderr.on("data", (b: Buffer) => {
+      const s = b.toString("utf8");
+      stderr += s;
+      for (const line of s.split(/\r?\n/)) {
+        if (line.trim()) console.log(`[ffmpeg:stderr] ${line}`);
+      }
+    });
+    ff.on("error", (err) => {
+      console.error(`[ffmpeg] spawn error: ${(err as Error).message}`);
+      reject(err);
+    });
     ff.on("close", (code) => {
+      console.log(`[ffmpeg] exited code=${code} pcmBytes=${bytesOut}`);
       if (code !== 0) {
         reject(new Error(`ffmpeg exited ${code}: ${stderr.trim()}`));
         return;

@@ -45,18 +45,34 @@ export class Scheduler {
     this.playStartFrame = 0;
     this.epoch++;
     for (const c of this.registry.all()) c.nextSendFrame = 0;
+    console.log(
+      `[scheduler] loadTrack: name="${track.name}" ` +
+      `durationSec=${track.durationSec.toFixed(3)} numFrames=${track.numFrames} ` +
+      `clients=${this.registry.all().length}`
+    );
     this.broadcastTransport();
     this.notify();
   }
 
   play(): void {
-    if (!this.track || this.state === "playing") return;
+    if (!this.track) {
+      console.log("[scheduler] play ignored: no track loaded");
+      return;
+    }
+    if (this.state === "playing") {
+      console.log("[scheduler] play ignored: already playing");
+      return;
+    }
     const startFrame = this.pausedAtFrame;
     this.playStartFrame = startFrame;
     this.playStartHostNs = nowNs();
     this.state = "playing";
     this.epoch++;
     for (const c of this.registry.all()) c.nextSendFrame = startFrame;
+    console.log(
+      `[scheduler] play: epoch=${this.epoch} startFrame=${startFrame} ` +
+      `clients=${this.registry.all().length}`
+    );
     this.broadcastTransport();
     this.startTimer();
     this.notify();

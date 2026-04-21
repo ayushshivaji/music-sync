@@ -12,7 +12,7 @@ import { decodeFileToPcm } from "./audio-pipeline.ts";
 import { ClientRegistry, mintClientId, type AudioClient } from "./clients.ts";
 import { Scheduler } from "./scheduler.ts";
 
-const PORT = Number(process.env.PORT ?? 7000);
+const PORT = Number(process.env.PORT ?? 7500);
 const HOST_DIR = new URL(".", import.meta.url).pathname;
 const CLIENT_DIR = join(HOST_DIR, "..", "client");
 const PUBLIC_DIR = join(HOST_DIR, "public");
@@ -24,6 +24,17 @@ const MIME: Record<string, string> = {
   ".css": "text/css; charset=utf-8",
   ".map": "application/json",
 };
+
+function log(tag: string, msg: string, extra?: Record<string, unknown>): void {
+  const ts = new Date().toISOString();
+  const suffix = extra ? " " + JSON.stringify(extra) : "";
+  console.log(`[${ts}] [${tag}] ${msg}${suffix}`);
+}
+function logErr(tag: string, msg: string, extra?: Record<string, unknown>): void {
+  const ts = new Date().toISOString();
+  const suffix = extra ? " " + JSON.stringify(extra) : "";
+  console.error(`[${ts}] [${tag}] ${msg}${suffix}`);
+}
 
 async function serveStatic(
   dir: string,
@@ -68,26 +79,61 @@ registry.onChange(broadcastControl);
 scheduler.onChange(broadcastControl);
 
 async function handleUpload(req: IncomingMessage, res: ServerResponse): Promise<void> {
-  await mkdir(UPLOAD_DIR, { recursive: true });
+  const remote = req.socket.remoteAddress ?? "?";
   const suggestedName = (req.headers["x-file-name"] as string | undefined) ?? `upload-${Date.now()}`;
   const safeName = basename(suggestedName).replace(/[^A-Za-z0-9._-]/g, "_");
+  log("upload", "request received", { remote, suggestedName, safeName });
+
+  await mkdir(UPLOAD_DIR, { recursive: true });
   const targetPath = join(UPLOAD_DIR, `${randomUUID()}-${safeName}`);
   const chunks: Buffer[] = [];
   let total = 0;
-  for await (const chunk of req) {
-    chunks.push(chunk as Buffer);
-    total += (chunk as Buffer).byteLength;
-    if (total > 500 * 1024 * 1024) {
-      res.writeHead(413); res.end("file too large (500MB cap)"); return;
-    }
-  }
-  await writeFile(targetPath, Buffer.concat(chunks));
+  const startedAt = Date.now();
   try {
+    for await (const chunk of req) {
+      chunks.push(chunk as Buffer);
+      total += (chunk as Buffer).byteLength;
+      if (total > 500 * 1024 * 1024) {
+        logErr("upload", "aborted — exceeds 500MB cap", { safeName, bytes: total });
+        res.writeHead(413); res.end("file too large (500MB cap)"); return;
+      }
+    }
+  } catch (err) {
+    logErr("upload", "stream read error", { safeName, error: (err as Error).message });
+    res.writeHead(400, { "content-type": "text/plain" });
+    res.end(`upload read failed: ${(err as Error).message}`);
+    return;
+  }
+  const readMs = Date.now() - startedAt;
+  log("upload", "body fully received", { safeName, bytes: total, readMs });
+
+  try {
+    await writeFile(targetPath, Buffer.concat(chunks));
+    log("upload", "written to disk", { targetPath, bytes: total });
+  } catch (err) {
+    logErr("upload", "failed to write file", { targetPath, error: (err as Error).message });
+    res.writeHead(500, { "content-type": "text/plain" });
+    res.end(`write failed: ${(err as Error).message}`);
+    return;
+  }
+
+  try {
+    log("decode", "invoking ffmpeg", { targetPath, displayName: safeName });
+    const decodeStart = Date.now();
     const track = await decodeFileToPcm(targetPath, safeName);
+    log("decode", "success", {
+      name: safeName,
+      durationSec: Number(track.durationSec.toFixed(3)),
+      numFrames: track.numFrames,
+      sampleRate: track.sampleRate,
+      decodeMs: Date.now() - decodeStart,
+    });
     scheduler.loadTrack(track);
+    log("scheduler", "track loaded", { name: safeName, durationSec: Number(track.durationSec.toFixed(3)) });
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({ ok: true, name: safeName, durationSec: track.durationSec }));
   } catch (err) {
+    logErr("decode", "ffmpeg failed", { name: safeName, error: (err as Error).message });
     res.writeHead(400, { "content-type": "text/plain" });
     res.end(`decode failed: ${(err as Error).message}`);
   }
@@ -100,6 +146,9 @@ const server = createServer(async (req, res) => {
     if (req.method === "POST" && path === "/upload") {
       await handleUpload(req, res);
       return;
+    }
+    if (req.method === "GET") {
+      log("http", `${req.method} ${path}`, { remote: req.socket.remoteAddress ?? "?" });
     }
     if (req.method === "GET" && path === "/") {
       if (await serveStatic(PUBLIC_DIR, "index.html", res)) return;
@@ -147,6 +196,7 @@ audioWss.on("connection", (ws, req) => {
     nextSendFrame: scheduler.snapshot().positionSec * 44100 | 0,
   };
   registry.add(client);
+  log("ws/audio", "client connected", { id, remoteAddr: client.remoteAddr });
   try { ws.send(JSON.stringify({ type: "hello", clientId: id })); } catch { /* ignore */ }
   scheduler.sendTransportTo(client);
 
@@ -161,18 +211,30 @@ audioWss.on("connection", (ws, req) => {
         ws.send(JSON.stringify({ type: "pong", t0: m.t0, t1: Number(nowNs()) }));
       } catch { /* ignore */ }
     } else if (m.type === "announce" && typeof m.name === "string") {
-      registry.setName(id, m.name.slice(0, 64));
+      const name = m.name.slice(0, 64);
+      registry.setName(id, name);
+      log("ws/audio", "client announced", { id, name });
     } else if (m.type === "late" && typeof m.count === "number") {
+      if (m.count > client.framesLate) {
+        log("ws/audio", "client reports late frames", { id, name: client.name, count: m.count });
+      }
       client.framesLate = m.count;
       broadcastControl();
     }
   });
 
-  ws.on("close", () => registry.remove(id));
+  ws.on("close", () => {
+    log("ws/audio", "client disconnected", { id, name: client.name });
+    registry.remove(id);
+  });
+  ws.on("error", (err) => {
+    logErr("ws/audio", "socket error", { id, error: (err as Error).message });
+  });
 });
 
-controlWss.on("connection", (ws) => {
+controlWss.on("connection", (ws, req) => {
   controlSockets.add(ws);
+  log("ws/ctl", "host UI connected", { remoteAddr: req.socket.remoteAddress ?? "?" });
   broadcastControl();
   ws.on("message", (data, isBinary) => {
     if (isBinary) return;
@@ -180,16 +242,28 @@ controlWss.on("connection", (ws) => {
     try { msg = JSON.parse(String(data)); } catch { return; }
     if (!msg || typeof msg !== "object") return;
     const m = msg as Record<string, unknown>;
-    if (m.type === "play") scheduler.play();
-    else if (m.type === "pause") scheduler.pause();
-    else if (m.type === "seek" && typeof m.positionSec === "number") scheduler.seek(m.positionSec);
-    else if (m.type === "assign" && typeof m.id === "string" && typeof m.channel === "string") {
+    if (m.type === "play") {
+      log("transport", "play");
+      scheduler.play();
+    } else if (m.type === "pause") {
+      log("transport", "pause");
+      scheduler.pause();
+    } else if (m.type === "seek" && typeof m.positionSec === "number") {
+      log("transport", "seek", { positionSec: Number(m.positionSec.toFixed(3)) });
+      scheduler.seek(m.positionSec);
+    } else if (m.type === "assign" && typeof m.id === "string" && typeof m.channel === "string") {
+      log("registry", "assign channel", { id: m.id, channel: m.channel });
       registry.setChannel(m.id, m.channel as Channel);
     } else if (m.type === "rename" && typeof m.id === "string" && typeof m.name === "string") {
-      registry.setName(m.id, m.name.slice(0, 64));
+      const name = m.name.slice(0, 64);
+      log("registry", "rename client", { id: m.id, name });
+      registry.setName(m.id, name);
     }
   });
-  ws.on("close", () => controlSockets.delete(ws));
+  ws.on("close", () => {
+    controlSockets.delete(ws);
+    log("ws/ctl", "host UI disconnected");
+  });
 });
 
 function lanUrls(): string[] {
