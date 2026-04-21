@@ -258,6 +258,15 @@ controlWss.on("connection", (ws, req) => {
       const name = m.name.slice(0, 64);
       log("registry", "rename client", { id: m.id, name });
       registry.setName(m.id, name);
+    } else if (m.type === "forceSync") {
+      const all = registry.all();
+      log("transport", "force-sync", { clients: all.length });
+      const payload = JSON.stringify({ type: "resync" });
+      for (const c of all) {
+        c.framesLate = 0;
+        try { c.ws.send(payload); } catch { /* ignore */ }
+      }
+      broadcastControl();
     }
   });
   ws.on("close", () => {

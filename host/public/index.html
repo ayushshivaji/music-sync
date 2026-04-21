@@ -50,6 +50,7 @@
     <div class="controls">
       <button id="play">Play</button>
       <button id="pause">Pause</button>
+      <button id="force-sync" title="Tells every connected client to reset its clock sync and re-anchor its playback timeline. Use if audio drifts or glitches.">Force sync</button>
       <progress id="progress" value="0" max="1"></progress>
       <span class="pos" id="time">0:00 / 0:00</span>
     </div>
@@ -58,11 +59,19 @@
   <h2 style="font-size: 1.1em">Connected clients</h2>
   <table id="clients">
     <thead>
-      <tr><th>Name</th><th>Channel</th><th>Addr</th><th>Late</th></tr>
+      <tr>
+        <th title="Click to rename. Shown back to the client so it can find itself.">Name</th>
+        <th title="left / right / mono / mute. Mute keeps the client connected but sends no audio.">Channel</th>
+        <th title="Remote IP as seen by the host. Docker Desktop shows its gateway IP here for every container-side connection.">Addr</th>
+        <th title="Frames that arrived after their scheduled play-time. 0 is healthy; rising numbers mean network lag or clock drift.">Late</th>
+      </tr>
     </thead>
     <tbody></tbody>
   </table>
   <div class="empty" id="empty">No clients yet. Open <code>/client</code> on another Mac.</div>
+  <div class="pos" style="font-size: .85em; opacity: .7; margin-top: .25rem">
+    <strong>Late</strong> = audio frames dropped because they arrived past their scheduled play-time. 0 = healthy. Rising values usually mean network lag or clock drift — try <em>Force sync</em>.
+  </div>
 
   <div id="err" class="err"></div>
   <script src="/host-ui.js"></script>

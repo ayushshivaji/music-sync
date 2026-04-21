@@ -39,6 +39,17 @@ let framesPlayed = 0;
 let pingTimer = null;
 let currentEpoch = 0;
 let scheduledNodes = [];
+let anchorHostNs = null;
+let anchorAudioTime = null;
+
+function resetAnchor() {
+  anchorHostNs = null;
+  anchorAudioTime = null;
+}
+
+function pingBurst() {
+  for (let i = 0; i < 10; i++) setTimeout(ping, i * 40);
+}
 
 async function start() {
   if (ctx) return;
@@ -60,7 +71,7 @@ function connect() {
     setStatus("connected", "ok");
     send({ type: "announce", name: nameInput.value || "client" });
     // Startup burst — fills the regression window quickly with low-RTT samples.
-    for (let i = 0; i < 10; i++) setTimeout(ping, i * 40);
+    pingBurst();
     // Then steady cadence spread over ~2 min for a clean drift slope.
     pingTimer = setInterval(ping, 3000);
   });
@@ -72,6 +83,7 @@ function connect() {
     setStatus("reconnecting", "warn");
     clearInterval(pingTimer);
     cancelScheduled();
+    resetAnchor();
     clock.reset();
     setTimeout(connect, 500);
   });
@@ -100,8 +112,19 @@ function handleJson(msg) {
     if (typeof msg.epoch === "number" && msg.epoch !== currentEpoch) {
       currentEpoch = msg.epoch;
       cancelScheduled();
+      resetAnchor();
     }
-    if (msg.state !== "playing") cancelScheduled();
+    if (msg.state !== "playing") {
+      cancelScheduled();
+      resetAnchor();
+    }
+  } else if (msg.type === "resync") {
+    cancelScheduled();
+    resetAnchor();
+    clock.reset();
+    framesLate = 0;
+    renderStatus();
+    pingBurst();
   }
 }
 
@@ -115,20 +138,28 @@ function handleBinary(buf) {
   const playAtHostNs = dv.getBigInt64(20, true);
   const pcm = new Int16Array(buf, HEADER_BYTES, numSamples);
 
-  const audioTime = clock.hostNsToAudioTime(playAtHostNs);
-  if (audioTime === null) {
-    // not clock-synced yet → play immediately, inherently loose for the first few frames
-    schedulePcm(pcm, sampleRate, ctx.currentTime + 0.05);
-    return;
+  let when;
+  if (anchorHostNs === null) {
+    const at = clock.hostNsToAudioTime(playAtHostNs);
+    if (at === null) {
+      // not clock-synced yet → play immediately, inherently loose for the first few frames
+      schedulePcm(pcm, sampleRate, ctx.currentTime + 0.05);
+      return;
+    }
+    anchorHostNs = playAtHostNs;
+    anchorAudioTime = at;
+    when = at;
+  } else {
+    when = anchorAudioTime + Number(playAtHostNs - anchorHostNs) / 1e9;
   }
   const deadline = ctx.currentTime + SCHEDULE_SAFETY_SEC;
-  if (audioTime < deadline) {
+  if (when < deadline) {
     framesLate++;
     send({ type: "late", count: framesLate });
     renderStatus();
     return;
   }
-  schedulePcm(pcm, sampleRate, audioTime);
+  schedulePcm(pcm, sampleRate, when);
 }
 
 function schedulePcm(pcmInt16, sampleRate, when) {

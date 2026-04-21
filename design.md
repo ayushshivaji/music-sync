@@ -56,9 +56,26 @@ Clients are **browser tabs** — no install, no native app. You visit `http://<h
   4. Creates an `AudioContext`.
 - On each incoming audio frame:
   1. Decodes Int16 → Float32, copies into an `AudioBuffer`.
-  2. Converts `playAtHostNs` → local `AudioContext` time using the measured offset.
+  2. Computes `when` via the **anchored schedule** (see below).
   3. Creates an `AudioBufferSourceNode`, calls `.start(when)`.
 - Discards frames whose scheduled time is already in the past (late arrival) and logs it — main health signal.
+
+#### Anchored playback schedule
+
+Naively, each frame would compute `when = clock.hostNsToAudioTime(playAtHostNs)`. That re-evaluates the ClockSync fit for every frame, and because the fit is refit on every pong, consecutive frames land on slightly different lines. The sub-millisecond offset between them causes overlap/gap at every frame boundary, audible as clicks and broadband static.
+
+Instead: pin `(anchorHostNs, anchorAudioTime)` at the first frame of each playback epoch, then schedule every subsequent frame purely by sample-delta from the anchor:
+
+```
+when = anchorAudioTime + Number(playAtHostNs - anchorHostNs) / 1e9
+```
+
+The anchor is reset (to null, forcing a fresh anchor on the next frame) on:
+- WS reconnect
+- Epoch change in the host's `transport` message (play / pause / seek)
+- A `resync` message from the host (see Force-sync below)
+
+The clock fit keeps running in the background so the *next* epoch starts aligned; within an epoch, frames never move.
 
 ### 3. Clock sync
 Standard NTP-lite, runs on the same WebSocket as audio:
@@ -116,20 +133,39 @@ One process. The host binary serves the client HTML, so there's literally one th
 
 ## Wire protocol
 
+Two WebSocket endpoints on the host:
+- `/ws` — audio + clock-sync. One connection per client.
+- `/ctl` — host UI control channel. Used by `host/public/host-ui.js`.
+
 All WS messages are JSON except audio frames, which are binary.
 
 ```ts
-// server → client
+// /ws  server → client
 type ServerMsg =
   | { type: "hello"; clientId: string }
   | { type: "pong"; t0: number; t1: number }
   | { type: "assign"; channel: "left" | "right" | "mono" | "mute" }
-  | { type: "transport"; state: "playing" | "paused"; positionNs: number; hostNowNs: number }
+  | { type: "transport"; state: "playing" | "paused"; positionNs: string; hostNowNs: string; epoch: number }
+  | { type: "resync" }   // host → clients: reset ClockSync + anchor, re-burst pings
 
-// server ← client
+// /ws  server ← client
 type ClientMsg =
   | { type: "ping"; t0: number }
   | { type: "announce"; name: string }
+  | { type: "late"; count: number }   // client-side running total of frames dropped for lateness
+
+// /ctl  host-UI → server
+type CtlMsg =
+  | { type: "play" }
+  | { type: "pause" }
+  | { type: "seek"; positionSec: number }
+  | { type: "assign"; id: string; channel: Channel }
+  | { type: "rename"; id: string; name: string }
+  | { type: "forceSync" }   // triggers a /ws resync broadcast + zeros framesLate counters
+
+// /ctl  server → host-UI
+//   { type: "state", transport: TransportSnapshot, clients: ClientSnapshot[] }
+//   broadcast on every registry/scheduler change and once per second on a timer.
 
 // binary audio frame (one ArrayBuffer)
 // header: 32 bytes, little-endian
@@ -148,8 +184,17 @@ type ClientMsg =
 
 - `host/scheduler.ts` — the core of the app. Owns the timeline, pushes frames to all client queues at the right rate, and is the ONE place where "what time is it and what sample comes next" lives.
 - `host/audio-pipeline.ts` — ffmpeg spawn + chunker.
-- `client/client.js` — Web Audio scheduling + offset math. Trickiest client-side code.
+- `host/index.ts` — HTTP + two WS servers (`/ws`, `/ctl`), upload endpoint, verbose structured logs.
+- `host/public/index.html`, `host/public/host-ui.js` — host control UI. Renders connected-clients table with in-place diffing so open `<select>`s aren't blown away by 1 Hz state broadcasts.
+- `client/client.js` — Web Audio scheduling + offset math + anchor. Trickiest client-side code.
 - `client/clock.js` — offset estimator. Kept tiny and unit-testable.
+
+## Host UI notes
+
+- Drop zone is a `<label>` wrapping the file input. Do NOT add a `click` handler that also calls `fileInput.click()` — it causes the picker to open twice.
+- The clients table is updated via surgical DOM edits (`syncClientsTable` in `host-ui.js`), not `innerHTML`, so an open `<select>` or focused `<input>` isn't clobbered every second. Any code that writes to those form elements must skip the write when the element is `document.activeElement`.
+- **Force sync** button on the host sends `{type:"forceSync"}` on `/ctl`. The server rebroadcasts `{type:"resync"}` on every `/ws` and zeros every client's `framesLate`. Use this when audio drifts or when a client has been asleep.
+- **Late** column = `framesLate` = client-reported count of frames that arrived after `ctx.currentTime + SCHEDULE_SAFETY_SEC` (20 ms). 0 means healthy; rising = network lag or clock drift.
 
 ## Milestones
 

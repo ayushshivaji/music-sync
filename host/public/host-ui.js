@@ -4,6 +4,7 @@ const fileInput = $("file");
 const trackName = $("track-name");
 const playBtn = $("play");
 const pauseBtn = $("pause");
+const forceSyncBtn = $("force-sync");
 const progress = $("progress");
 const timeEl = $("time");
 const clientsBody = $("clients").querySelector("tbody");
@@ -49,30 +50,86 @@ function render(msg) {
   playBtn.disabled = !t.trackName || t.state === "playing";
   pauseBtn.disabled = !t.trackName || t.state !== "playing";
 
-  const rows = msg.clients.map((c) => {
-    const channels = ["left", "right", "mono", "mute"];
-    const opts = channels.map((ch) => `<option value="${ch}"${ch === c.channel ? " selected" : ""}>${ch}</option>`).join("");
-    return `<tr>
-      <td><input type="text" data-id="${c.id}" class="rename" value="${escapeHtml(c.name)}" /></td>
-      <td><select data-id="${c.id}" class="assign">${opts}</select></td>
-      <td class="pos">${escapeHtml(c.remoteAddr)}</td>
-      <td class="pos">${c.framesLate}</td>
-    </tr>`;
-  });
-  clientsBody.innerHTML = rows.join("");
+  syncClientsTable(msg.clients);
   emptyEl.style.display = msg.clients.length ? "none" : "";
-  for (const el of clientsBody.querySelectorAll("select.assign")) {
-    el.addEventListener("change", () => send({ type: "assign", id: el.dataset.id, channel: el.value }));
-  }
-  for (const el of clientsBody.querySelectorAll("input.rename")) {
-    el.addEventListener("change", () => send({ type: "rename", id: el.dataset.id, name: el.value }));
-  }
 }
 
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, (c) => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-  })[c]);
+const CHANNELS = ["left", "right", "mono", "mute"];
+
+function createClientRow(c) {
+  const tr = document.createElement("tr");
+  tr.dataset.cid = c.id;
+
+  const nameTd = document.createElement("td");
+  const nameInput = document.createElement("input");
+  nameInput.type = "text";
+  nameInput.className = "rename";
+  nameInput.dataset.id = c.id;
+  nameInput.value = c.name;
+  nameInput.addEventListener("change", () => send({ type: "rename", id: c.id, name: nameInput.value }));
+  nameTd.appendChild(nameInput);
+
+  const chanTd = document.createElement("td");
+  const select = document.createElement("select");
+  select.className = "assign";
+  select.dataset.id = c.id;
+  for (const ch of CHANNELS) {
+    const opt = document.createElement("option");
+    opt.value = ch;
+    opt.textContent = ch;
+    if (ch === c.channel) opt.selected = true;
+    select.appendChild(opt);
+  }
+  select.addEventListener("change", () => send({ type: "assign", id: select.dataset.id, channel: select.value }));
+  chanTd.appendChild(select);
+
+  const addrTd = document.createElement("td");
+  addrTd.className = "pos";
+  addrTd.textContent = c.remoteAddr;
+
+  const lateTd = document.createElement("td");
+  lateTd.className = "pos";
+  lateTd.textContent = String(c.framesLate);
+
+  tr.append(nameTd, chanTd, addrTd, lateTd);
+  return tr;
+}
+
+function syncClientsTable(clients) {
+  const existing = new Map();
+  for (const tr of clientsBody.querySelectorAll("tr[data-cid]")) {
+    existing.set(tr.dataset.cid, tr);
+  }
+  const incomingIds = new Set(clients.map((c) => c.id));
+
+  for (const [id, tr] of existing) {
+    if (!incomingIds.has(id)) {
+      if (!tr.contains(document.activeElement)) tr.remove();
+    }
+  }
+
+  for (let i = 0; i < clients.length; i++) {
+    const c = clients[i];
+    let tr = existing.get(c.id);
+    if (!tr) {
+      tr = createClientRow(c);
+      clientsBody.appendChild(tr);
+      continue;
+    }
+    const nameInput = tr.querySelector("input.rename");
+    const select = tr.querySelector("select.assign");
+    const addrTd = tr.children[2];
+    const lateTd = tr.children[3];
+    if (document.activeElement !== nameInput && nameInput.value !== c.name) {
+      nameInput.value = c.name;
+    }
+    if (document.activeElement !== select && select.value !== c.channel) {
+      select.value = c.channel;
+    }
+    if (addrTd.textContent !== c.remoteAddr) addrTd.textContent = c.remoteAddr;
+    const lateStr = String(c.framesLate);
+    if (lateTd.textContent !== lateStr) lateTd.textContent = lateStr;
+  }
 }
 
 async function uploadFile(file) {
@@ -108,6 +165,7 @@ drop.addEventListener("drop", (e) => {
 
 playBtn.addEventListener("click", () => send({ type: "play" }));
 pauseBtn.addEventListener("click", () => send({ type: "pause" }));
+forceSyncBtn.addEventListener("click", () => send({ type: "forceSync" }));
 progress.addEventListener("click", (e) => {
   if (!lastState?.transport.durationSec) return;
   const rect = progress.getBoundingClientRect();
