@@ -16,8 +16,16 @@ services:
     # network_mode: host   # Linux only; also comment out `ports:` above
     volumes:
       - uploads:/tmp/music-sync-uploads
+      - data:/app/data
     environment:
       - PORT=7500
+      # Default cap on how many items yt-dlp pulls from a playlist URL.
+      # The host UI shows this as the initial "max" and users can lower it
+      # per request; the server hard-clamps to 500 regardless.
+      - PLAYLIST_MAX=50
+      # Persisted data (favourites.json lives here). Matches the `data:` volume.
+      - DATA_DIR=/app/data
 
 volumes:
   uploads:
+  data:

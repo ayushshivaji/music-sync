@@ -8,8 +8,13 @@ export function nsToSeconds(ns: bigint): number {
 
 export const FRAME_MAGIC = 0x53594e43;
 export const FRAME_HEADER_BYTES = 32;
-export const SAMPLE_RATE = 44100;
-export const FRAME_SAMPLES = 4410;
+// Master rate used for the host's timeline math. Matches macOS Core Audio's
+// native rate so 48 kHz clients need no resampling at all.
+export const SAMPLE_RATE = 48000;
+export const FRAME_DURATION_SEC = 0.1;
+export const MASTER_FRAME_SAMPLES = Math.round(FRAME_DURATION_SEC * SAMPLE_RATE);
+// Legacy alias for callers that still treat frames at the master rate.
+export const FRAME_SAMPLES = MASTER_FRAME_SAMPLES;
 
 export type Channel = "left" | "right" | "mono" | "mute";
 

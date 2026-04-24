@@ -34,26 +34,78 @@
     .empty { opacity: .6; padding: 1rem; text-align: center; }
     .pos { font-variant-numeric: tabular-nums; opacity: .8; font-size: .9em; }
     .err { color: #c33; white-space: pre-wrap; font-family: monospace; font-size: .85em; }
+    #favs li {
+      display: flex; align-items: center; gap: .5rem; padding: .35rem .5rem;
+      border-bottom: 1px solid rgba(128,128,128,.25);
+    }
+    #favs li input.fav-name { flex: 1; min-width: 8em; }
+    #favs li .fav-url { font-family: monospace; font-size: .8em; opacity: .6; max-width: 16em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #favs li button { padding: .15rem .5rem; font-size: .85em; cursor: pointer; }
+    #queue { list-style: none; padding-left: 0; }
+    #queue li {
+      display: flex; align-items: center; gap: .5rem; padding: .35rem .5rem;
+      border: 1px solid transparent; border-radius: 6px;
+      cursor: grab; user-select: none;
+    }
+    #queue li:active { cursor: grabbing; }
+    #queue li.dragging { opacity: .4; }
+    #queue li.drop-before { border-top-color: currentColor; }
+    #queue li.drop-after  { border-bottom-color: currentColor; }
+    #queue li .handle { opacity: .5; font-size: 1.1em; }
+    #queue li .qname { flex: 1; }
+    #queue li button { padding: .15rem .5rem; font-size: .85em; cursor: pointer; }
   </style>
 </head>
 <body>
   <h1>music-sync · host</h1>
 
   <label class="dropzone" id="drop">
-    <input type="file" id="file" accept="audio/*" />
-    <div><strong>Drop an audio file</strong> or click to pick one</div>
+    <input type="file" id="file" accept="audio/*" multiple />
+    <div><strong>Drop audio files or a folder</strong> — or click to pick files</div>
     <div class="pos">mp3, wav, flac, m4a, ogg — anything ffmpeg can decode</div>
   </label>
+  <div style="text-align: center; margin-top: .5rem">
+    <input type="file" id="folder" webkitdirectory multiple style="display:none" />
+    <button type="button" id="pick-folder" title="Pick a folder; every audio file inside (recursively) is added to the queue in filename order.">Add folder…</button>
+  </div>
+
+  <div style="display: flex; gap: .5rem; align-items: center; margin-top: .75rem">
+    <input type="text" id="url-input" placeholder="Paste a YouTube video / playlist (or any yt-dlp–supported) URL…" style="flex: 1" />
+    <label for="url-max" class="pos" style="font-size: .85em">max</label>
+    <input type="number" id="url-max" min="1" value="50" step="1" style="width: 4.5em" title="Maximum number of tracks to pull from a playlist URL. Ignored for single-video URLs." />
+    <button type="button" id="url-fav" title="Save this URL to favourites (persisted on the host). Does not play it.">☆</button>
+    <button type="button" id="url-submit" title="Downloads audio via yt-dlp (playlists supported up to 'max'), transcodes to mp3, and appends every track to the queue.">Add from URL</button>
+  </div>
+
+  <div id="fav-wrap" style="display:none">
+    <div style="display:flex; align-items:baseline; justify-content:space-between; margin-top: 1rem">
+      <h2 style="font-size: 1.1em; margin: 0">Favourites</h2>
+      <span class="pos" style="font-size: .8em; opacity: .7">Stored on the host. Click ▶ to queue.</span>
+    </div>
+    <ul id="favs" style="padding-left: 0; margin: .5rem 0 0 0; list-style: none"></ul>
+  </div>
 
   <div class="track" id="track">
-    <div id="track-name" class="pos">No track loaded</div>
+    <div style="display: flex; align-items: center; gap: .5rem">
+      <span id="track-name" class="pos" style="flex: 1">No track loaded</span>
+      <button type="button" id="track-fav" style="display:none" title="Favourite this track">☆</button>
+    </div>
     <div class="controls">
       <button id="play">Play</button>
       <button id="pause">Pause</button>
+      <button id="next" title="Skip to the next track in the queue.">Next</button>
       <button id="force-sync" title="Tells every connected client to reset its clock sync and re-anchor its playback timeline. Use if audio drifts or glitches.">Force sync</button>
       <progress id="progress" value="0" max="1"></progress>
       <span class="pos" id="time">0:00 / 0:00</span>
     </div>
+  </div>
+
+  <div id="queue-wrap" style="display:none">
+    <div style="display:flex; align-items:baseline; justify-content:space-between; margin-top: 1rem">
+      <h2 style="font-size: 1.1em; margin: 0">Queue</h2>
+      <button id="clear-queue" title="Remove every pending track from the queue. Does not affect the currently loaded track.">Clear queue</button>
+    </div>
+    <ol id="queue" style="padding-left: 1.25rem; margin: .5rem 0 0 0"></ol>
   </div>
 
   <h2 style="font-size: 1.1em">Connected clients</h2>
@@ -62,6 +114,7 @@
       <tr>
         <th title="Click to rename. Shown back to the client so it can find itself.">Name</th>
         <th title="left / right / mono / mute. Mute keeps the client connected but sends no audio.">Channel</th>
+        <th title="Linear gain applied on this client, 0 (muted) to 100 (unity). Does not change any other client's volume.">Volume</th>
         <th title="Remote IP as seen by the host. Docker Desktop shows its gateway IP here for every container-side connection.">Addr</th>
         <th title="Frames that arrived after their scheduled play-time. 0 is healthy; rising numbers mean network lag or clock drift.">Late</th>
       </tr>

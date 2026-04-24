@@ -36,24 +36,27 @@ Clients are **browser tabs** — no install, no native app. You visit `http://<h
 
 ### 1. Host process (`host/`)
 - Node.js + TypeScript.
-- Decodes audio file → 44.1kHz 16-bit PCM via `ffmpeg` (spawned). Handles every format.
-- Holds one **master timeline**: `position` in samples, `state` = playing/paused.
-- Chunks the PCM into 100ms frames. For each connected client, sends frames for the channel that client is assigned (mono, left-only, right-only).
+- Decodes audio file → **48 kHz master** 16-bit stereo PCM via `ffmpeg` (spawned). On demand, re-invokes ffmpeg to produce additional copies of the track at every distinct client sample rate (e.g. 44.1 kHz) and caches them.
+- Holds one **master timeline**: `position` in master-rate samples, `state` = playing/paused. Positions stay in master samples regardless of the per-client PCM rate.
+- Chunks the PCM into 100ms frames. For each connected client, sends frames for the channel that client is assigned (mono, left-only, right-only), extracted from the cached copy that matches **that client's** `AudioContext.sampleRate`. Frame length in samples therefore varies per client; frame duration stays exactly 100 ms.
 - Each frame on the wire: `{ seq, playAtHostNs, channel, sampleRate, pcm: Int16Array }` as a binary WebSocket message (small header + raw PCM).
 - Buffers 500ms ahead of "now" — send rate matches playback rate, but each frame carries a play-time 500ms in the future of its send-time.
 - Serves a tiny local web UI on the same port:
-  - drag-drop a file
+  - drag-drop files **or a folder** (recursed; non-audio entries skipped; sorted by filename) — each upload is **appended to a FIFO queue**. The first upload becomes the current track (paused); subsequent uploads queue behind it and auto-advance when the current one ends. Folder pick also available via an "Add folder…" button that uses `<input webkitdirectory>`.
+  - **URL ingest** via `/upload-url` (POST `{url, playlistLimit?}`): host spawns `yt-dlp` (packaged in the Docker image alongside ffmpeg), downloads the best audio stream, transcodes to mp3, then runs the same decode → scheduler path as a regular upload. Works for YouTube and every other site yt-dlp supports. **Playlists are supported** — each track is decoded and enqueued as soon as yt-dlp finishes it, so the first track is playable while the rest are still downloading. The playlist ceiling is controlled by the `PLAYLIST_MAX` env var (default 50, hard-clamped server-side to 500); the host UI exposes a per-request override as a number input next to the URL field, preseeded from the server's default via the `/ctl` state broadcast.
+  - **Favourites** — a ★ toggle next to the URL field persists the typed URL to `${DATA_DIR}/favourites.json` on the host (default `/app/data/favourites.json`, mounted as a Docker volume so it survives container restarts). Each saved favourite shows in a panel with an inline-editable name, a ▶ button that re-submits it to `/upload-url` with the current "max" setting, and an × remove. Favourites are URL-only; file uploads aren't saved because the server-side file is ephemeral.
   - list of connected clients (by name / IP)
-  - per-client channel dropdown (Left / Right / Mono / Mute)
-  - play / pause / seek
+  - per-client **channel** dropdown (Left / Right / Mono / Mute)
+  - per-client **volume** slider (0–100 %) applied client-side via a shared `GainNode` — does not rescale PCM or affect any other client
+  - play / pause / seek / **next** (skip to queued track) / **clear queue** / **force sync**
 
 ### 2. Client (browser)
 - Single HTML page served by the host. No build step required initially.
 - On load:
-  1. Opens a WebSocket to the host.
-  2. Runs clock-sync handshake (below).
-  3. Announces itself with a human-readable name (user-typed, or derived from `navigator.userAgent`).
-  4. Creates an `AudioContext`.
+  1. Creates an `AudioContext`.
+  2. Opens a WebSocket to the host.
+  3. Runs clock-sync handshake (below).
+  4. Announces itself with a human-readable name (user-typed, or derived from `navigator.userAgent`) **and its `AudioContext.sampleRate`**. The host uses the rate to pick the right cached PCM copy so every frame arrives at the client's native rate and Web Audio does zero per-buffer resampling (which would otherwise produce polyphase-edge hiss at every 100 ms boundary).
 - On each incoming audio frame:
   1. Decodes Int16 → Float32, copies into an `AudioBuffer`.
   2. Computes `when` via the **anchored schedule** (see below).
@@ -147,11 +150,12 @@ type ServerMsg =
   | { type: "assign"; channel: "left" | "right" | "mono" | "mute" }
   | { type: "transport"; state: "playing" | "paused"; positionNs: string; hostNowNs: string; epoch: number }
   | { type: "resync" }   // host → clients: reset ClockSync + anchor, re-burst pings
+  | { type: "volume"; volume: number }   // host → single client; 0..1 linear gain
 
 // /ws  server ← client
 type ClientMsg =
   | { type: "ping"; t0: number }
-  | { type: "announce"; name: string }
+  | { type: "announce"; name: string; sampleRate: number }   // sampleRate = AudioContext.sampleRate
   | { type: "late"; count: number }   // client-side running total of frames dropped for lateness
 
 // /ctl  host-UI → server
@@ -159,24 +163,36 @@ type CtlMsg =
   | { type: "play" }
   | { type: "pause" }
   | { type: "seek"; positionSec: number }
+  | { type: "next" }                               // skip to head of queue
+  | { type: "removeQueued"; index: number }        // drop a pending queue item
+  | { type: "moveQueued"; fromIndex: number; toIndex: number }  // reorder within the queue
+  | { type: "clearQueue" }                         // drop every pending queue item (current stays)
   | { type: "assign"; id: string; channel: Channel }
+  | { type: "setVolume"; id: string; volume: number }
   | { type: "rename"; id: string; name: string }
+  | { type: "addFavourite"; url: string; name?: string }
+  | { type: "renameFavourite"; id: string; name: string }
+  | { type: "removeFavourite"; id: string }
   | { type: "forceSync" }   // triggers a /ws resync broadcast + zeros framesLate counters
 
 // /ctl  server → host-UI
-//   { type: "state", transport: TransportSnapshot, clients: ClientSnapshot[] }
-//   broadcast on every registry/scheduler change and once per second on a timer.
+//   { type: "state", transport: TransportSnapshot, config: ConfigSnapshot, favourites: FavouriteSnapshot[], clients: ClientSnapshot[] }
+//   TransportSnapshot: { state, trackName, durationSec, positionSec, queue: Array<{name, durationSec}> }
+//   ConfigSnapshot:    { playlistDefault: number, playlistCeiling: number }   // host-UI initial values / clamp
+//   FavouriteSnapshot: { id, url, name }                                       // ordered newest-first
+//   ClientSnapshot:    { id, name, channel, remoteAddr, framesLate, sampleRate, volume }
+//   broadcast on every registry/scheduler/favourites change and once per second on a timer.
 
 // binary audio frame (one ArrayBuffer)
 // header: 32 bytes, little-endian
-//   u32 magic = 0xAUD10FRM
+//   u32 magic = 0x53594e43 ("SYNC")
 //   u32 seq
-//   u32 sampleRate     (e.g. 44100)
-//   u32 numSamples     (per channel, e.g. 4410 for 100ms)
+//   u32 sampleRate     (matches receiving client's AudioContext.sampleRate)
+//   u32 numSamples     (per channel; 100ms at that rate, e.g. 4800 @ 48 kHz, 4410 @ 44.1 kHz)
 //   u8  channels       (always 1 after split)
 //   u8  bitsPerSample  (16)
 //   u16 reserved
-//   i64 playAtHostNs
+//   i64 playAtHostNs   (host monotonic time; same value for the same song position across all clients, regardless of each client's PCM rate — this is what keeps them synced)
 // body: numSamples * channels * bytesPerSample  (Int16 LE)
 ```
 
@@ -203,7 +219,7 @@ type CtlMsg =
 3. **M3 — channel assignment UI + stereo.** Two Macs as L/R, physically spaced, sanity-check stereo image on a familiar track (e.g., Pink Floyd "Money").
 4. **M4 — transport controls.** Play/pause/seek propagate correctly (seeking flushes client buffers and re-schedules from the new position).
 5. **M5 — stability.** Reconnect on WS drop, survive laptop sleep on a client, graceful degradation when one client lags.
-6. **M6+ — YouTube ingest.** `yt-dlp` as a source feeding the same `audio-pipeline.ts`. Design stays unchanged.
+6. **M6 — URL ingest.** `yt-dlp` as a source feeding the same `audio-pipeline.ts`. Done: `/upload-url` endpoint downloads audio via `yt-dlp -x --audio-format mp3` and enqueues it.
 
 ## Verification
 
@@ -214,7 +230,6 @@ type CtlMsg =
 
 ## Non-goals for MVP
 
-- YouTube / web URL ingest (M6).
 - Phone clients (Web Audio on iOS Safari has suspend-on-lock issues).
 - Internet/WAN sync (needs a relay server).
 - Surround (>2 channels).

@@ -18,6 +18,7 @@ const driftEl = $("drift");
 const residualEl = $("residual");
 const samplesEl = $("samples");
 const lateEl = $("late");
+const sampleRateEl = $("sample-rate");
 
 nameInput.value = guessName();
 
@@ -31,6 +32,7 @@ joinBtn.addEventListener("click", start);
 nameInput.addEventListener("keydown", (e) => { if (e.key === "Enter") start(); });
 
 let ctx = null;
+let gain = null;
 let ws = null;
 let clock = null;
 let channel = "mono";
@@ -55,8 +57,12 @@ async function start() {
   if (ctx) return;
   ctx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: "playback" });
   if (ctx.state === "suspended") await ctx.resume();
+  gain = ctx.createGain();
+  gain.gain.value = 1;
+  gain.connect(ctx.destination);
   clock = new ClockSync(ctx);
   clock.onChange(renderStatus);
+  if (sampleRateEl) sampleRateEl.textContent = `${ctx.sampleRate} Hz`;
   joinCard.style.display = "none";
   statusCard.style.display = "";
   connect();
@@ -69,7 +75,11 @@ function connect() {
   ws.binaryType = "arraybuffer";
   ws.addEventListener("open", () => {
     setStatus("connected", "ok");
-    send({ type: "announce", name: nameInput.value || "client" });
+    send({
+      type: "announce",
+      name: nameInput.value || "client",
+      sampleRate: ctx.sampleRate,
+    });
     // Startup burst — fills the regression window quickly with low-RTT samples.
     pingBurst();
     // Then steady cadence spread over ~2 min for a clean drift slope.
@@ -125,6 +135,13 @@ function handleJson(msg) {
     framesLate = 0;
     renderStatus();
     pingBurst();
+  } else if (msg.type === "volume") {
+    if (gain && typeof msg.volume === "number" && Number.isFinite(msg.volume)) {
+      const vol = Math.max(0, Math.min(1, msg.volume));
+      const now = ctx.currentTime;
+      gain.gain.cancelScheduledValues(now);
+      gain.gain.setTargetAtTime(vol, now, 0.01);
+    }
   }
 }
 
@@ -168,7 +185,7 @@ function schedulePcm(pcmInt16, sampleRate, when) {
   for (let i = 0; i < pcmInt16.length; i++) ch[i] = pcmInt16[i] / 32768;
   const src = ctx.createBufferSource();
   src.buffer = buf;
-  src.connect(ctx.destination);
+  src.connect(gain ?? ctx.destination);
   src.onended = () => {
     const idx = scheduledNodes.indexOf(src);
     if (idx >= 0) scheduledNodes.splice(idx, 1);

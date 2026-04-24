@@ -7,16 +7,28 @@ import { randomUUID } from "node:crypto";
 import { networkInterfaces } from "node:os";
 import { WebSocketServer, type WebSocket } from "ws";
 
-import { nowNs, type Channel } from "./clock.ts";
+import { nowNs, SAMPLE_RATE, type Channel } from "./clock.ts";
 import { decodeFileToPcm } from "./audio-pipeline.ts";
-import { ClientRegistry, mintClientId, type AudioClient } from "./clients.ts";
+import {
+  ClientRegistry,
+  DEFAULT_CLIENT_RATE,
+  mintClientId,
+  type AudioClient,
+} from "./clients.ts";
 import { Scheduler } from "./scheduler.ts";
+import { fetchAudioFromUrl } from "./url-fetch.ts";
+import { FavouritesStore, defaultFavouritesPath } from "./favourites.ts";
 
 const PORT = Number(process.env.PORT ?? 7500);
 const HOST_DIR = new URL(".", import.meta.url).pathname;
 const CLIENT_DIR = join(HOST_DIR, "..", "client");
 const PUBLIC_DIR = join(HOST_DIR, "public");
 const UPLOAD_DIR = join(tmpdir(), "music-sync-uploads");
+const PLAYLIST_MAX_DEFAULT = Math.max(
+  1,
+  Math.min(500, Number(process.env.PLAYLIST_MAX ?? 50) || 50),
+);
+const PLAYLIST_HARD_CEILING = 500;
 
 const MIME: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -55,6 +67,8 @@ async function serveStatic(
 
 const registry = new ClientRegistry();
 const scheduler = new Scheduler(registry);
+const favourites = new FavouritesStore(defaultFavouritesPath());
+favourites.onChange(() => broadcastControl());
 
 const controlSockets = new Set<WebSocket>();
 
@@ -62,12 +76,19 @@ function broadcastControl(): void {
   const msg = JSON.stringify({
     type: "state",
     transport: scheduler.snapshot(),
+    config: {
+      playlistDefault: PLAYLIST_MAX_DEFAULT,
+      playlistCeiling: PLAYLIST_HARD_CEILING,
+    },
+    favourites: favourites.all().map((f) => ({ id: f.id, url: f.url, name: f.name })),
     clients: registry.all().map((c) => ({
       id: c.id,
       name: c.name,
       channel: c.channel,
       remoteAddr: c.remoteAddr,
       framesLate: c.framesLate,
+      sampleRate: c.sampleRate,
+      volume: c.volume,
     })),
   });
   for (const ws of controlSockets) {
@@ -128,8 +149,11 @@ async function handleUpload(req: IncomingMessage, res: ServerResponse): Promise<
       sampleRate: track.sampleRate,
       decodeMs: Date.now() - decodeStart,
     });
-    scheduler.loadTrack(track);
-    log("scheduler", "track loaded", { name: safeName, durationSec: Number(track.durationSec.toFixed(3)) });
+    scheduler.enqueue(track);
+    log("scheduler", "track queued", {
+      name: safeName,
+      durationSec: Number(track.durationSec.toFixed(3)),
+    });
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({ ok: true, name: safeName, durationSec: track.durationSec }));
   } catch (err) {
@@ -139,12 +163,122 @@ async function handleUpload(req: IncomingMessage, res: ServerResponse): Promise<
   }
 }
 
+async function handleUrlUpload(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const remote = req.socket.remoteAddress ?? "?";
+  const chunks: Buffer[] = [];
+  let total = 0;
+  try {
+    for await (const chunk of req) {
+      chunks.push(chunk as Buffer);
+      total += (chunk as Buffer).byteLength;
+      if (total > 64 * 1024) {
+        res.writeHead(413); res.end("url body too large"); return;
+      }
+    }
+  } catch (err) {
+    logErr("url-upload", "stream read error", { error: (err as Error).message });
+    res.writeHead(400); res.end(`upload read failed: ${(err as Error).message}`);
+    return;
+  }
+  let parsed: { url?: unknown; playlistLimit?: unknown };
+  try {
+    parsed = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  } catch (err) {
+    res.writeHead(400); res.end(`invalid json: ${(err as Error).message}`);
+    return;
+  }
+  const url = typeof parsed.url === "string" ? parsed.url.trim() : "";
+  if (!url) {
+    res.writeHead(400); res.end("missing 'url'");
+    return;
+  }
+  if (!/^https?:\/\//i.test(url)) {
+    res.writeHead(400); res.end("url must start with http:// or https://");
+    return;
+  }
+  const requestedLimit =
+    typeof parsed.playlistLimit === "number" && Number.isFinite(parsed.playlistLimit)
+      ? Math.floor(parsed.playlistLimit)
+      : PLAYLIST_MAX_DEFAULT;
+  const playlistLimit = Math.max(1, Math.min(PLAYLIST_HARD_CEILING, requestedLimit));
+  log("url-upload", "request received", { remote, url, playlistLimit });
+
+  let perTrackFailures = 0;
+  const queuedNames: string[] = [];
+  try {
+    const result = await fetchAudioFromUrl(url, {
+      uploadDir: UPLOAD_DIR,
+      playlistLimit,
+      onTrack: async (file) => {
+        try {
+          log("decode", "invoking ffmpeg", { targetPath: file.path, displayName: file.displayName });
+          const decodeStart = Date.now();
+          const track = await decodeFileToPcm(file.path, file.displayName);
+          // Carry the per-video URL through so the queue UI can offer a
+          // "favourite this track" action. Fall back to the request URL when
+          // yt-dlp didn't emit a webpage_url (older builds, edge extractors).
+          track.sourceUrl = file.sourceUrl || url;
+          log("decode", "success", {
+            name: file.displayName,
+            durationSec: Number(track.durationSec.toFixed(3)),
+            numFrames: track.numFrames,
+            sampleRate: track.sampleRate,
+            decodeMs: Date.now() - decodeStart,
+          });
+          scheduler.enqueue(track);
+          queuedNames.push(file.displayName);
+          log("scheduler", "track queued", {
+            name: file.displayName,
+            durationSec: Number(track.durationSec.toFixed(3)),
+            source: "url",
+          });
+        } catch (err) {
+          perTrackFailures++;
+          logErr("decode", "ffmpeg failed", {
+            name: file.displayName,
+            error: (err as Error).message,
+          });
+        }
+      },
+    });
+    log("url-upload", "yt-dlp finished", {
+      attempted: result.count,
+      queued: queuedNames.length,
+      failed: perTrackFailures,
+    });
+    if (queuedNames.length === 0) {
+      res.writeHead(400, { "content-type": "text/plain" });
+      res.end(
+        perTrackFailures > 0
+          ? `decode failed for every track (${perTrackFailures} file${perTrackFailures === 1 ? "" : "s"})`
+          : "yt-dlp produced no tracks",
+      );
+      return;
+    }
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({
+      ok: true,
+      count: queuedNames.length,
+      failed: perTrackFailures,
+      tracks: queuedNames,
+    }));
+  } catch (err) {
+    logErr("url-upload", "yt-dlp failed", { url, error: (err as Error).message });
+    res.writeHead(400, { "content-type": "text/plain" });
+    res.end(`yt-dlp failed: ${(err as Error).message}`);
+  }
+}
+
 const server = createServer(async (req, res) => {
   const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
   const path = url.pathname;
   try {
     if (req.method === "POST" && path === "/upload") {
       await handleUpload(req, res);
+      return;
+    }
+    if (req.method === "POST" && path === "/upload-url") {
+      await handleUrlUpload(req, res);
       return;
     }
     if (req.method === "GET") {
@@ -193,7 +327,9 @@ audioWss.on("connection", (ws, req) => {
     remoteAddr: req.socket.remoteAddress ?? "?",
     connectedAtNs: nowNs(),
     framesLate: 0,
-    nextSendFrame: scheduler.snapshot().positionSec * 44100 | 0,
+    nextSendFrame: scheduler.snapshot().positionSec * SAMPLE_RATE | 0,
+    sampleRate: DEFAULT_CLIENT_RATE,
+    volume: 1,
   };
   registry.add(client);
   log("ws/audio", "client connected", { id, remoteAddr: client.remoteAddr });
@@ -213,7 +349,21 @@ audioWss.on("connection", (ws, req) => {
     } else if (m.type === "announce" && typeof m.name === "string") {
       const name = m.name.slice(0, 64);
       registry.setName(id, name);
-      log("ws/audio", "client announced", { id, name });
+      let sr: number | null = null;
+      if (typeof m.sampleRate === "number" && Number.isFinite(m.sampleRate)) {
+        const rounded = Math.round(m.sampleRate);
+        if (rounded >= 8000 && rounded <= 192000) {
+          sr = rounded;
+          registry.setRate(id, rounded);
+          void scheduler.ensureRate(rounded);
+        } else {
+          log("ws/audio", "client announced invalid sampleRate; using default", {
+            id,
+            requested: m.sampleRate,
+          });
+        }
+      }
+      log("ws/audio", "client announced", { id, name, sampleRate: sr ?? DEFAULT_CLIENT_RATE });
     } else if (m.type === "late" && typeof m.count === "number") {
       if (m.count > client.framesLate) {
         log("ws/audio", "client reports late frames", { id, name: client.name, count: m.count });
@@ -251,13 +401,55 @@ controlWss.on("connection", (ws, req) => {
     } else if (m.type === "seek" && typeof m.positionSec === "number") {
       log("transport", "seek", { positionSec: Number(m.positionSec.toFixed(3)) });
       scheduler.seek(m.positionSec);
+    } else if (m.type === "next") {
+      log("transport", "next");
+      scheduler.skipNext();
+    } else if (m.type === "removeQueued" && typeof m.index === "number") {
+      log("transport", "removeQueued", { index: m.index });
+      scheduler.removeFromQueue(m.index);
+    } else if (
+      m.type === "moveQueued" &&
+      typeof m.fromIndex === "number" &&
+      typeof m.toIndex === "number"
+    ) {
+      log("transport", "moveQueued", { fromIndex: m.fromIndex, toIndex: m.toIndex });
+      scheduler.moveQueued(m.fromIndex, m.toIndex);
+    } else if (m.type === "clearQueue") {
+      log("transport", "clearQueue");
+      scheduler.clearQueue();
     } else if (m.type === "assign" && typeof m.id === "string" && typeof m.channel === "string") {
       log("registry", "assign channel", { id: m.id, channel: m.channel });
       registry.setChannel(m.id, m.channel as Channel);
+    } else if (m.type === "setVolume" && typeof m.id === "string" && typeof m.volume === "number") {
+      const vol = Math.max(0, Math.min(1, m.volume));
+      registry.setVolume(m.id, vol);
+      const target = registry.get(m.id);
+      if (target) {
+        try {
+          target.ws.send(JSON.stringify({ type: "volume", volume: vol }));
+        } catch { /* ignore */ }
+      }
     } else if (m.type === "rename" && typeof m.id === "string" && typeof m.name === "string") {
       const name = m.name.slice(0, 64);
       log("registry", "rename client", { id: m.id, name });
       registry.setName(m.id, name);
+    } else if (m.type === "addFavourite" && typeof m.url === "string") {
+      const name = typeof m.name === "string" ? m.name : undefined;
+      favourites.add(m.url, name).then((fav) => {
+        if (fav) log("favourites", "added", { id: fav.id, url: fav.url, name: fav.name });
+      });
+    } else if (m.type === "removeFavourite" && typeof m.id === "string") {
+      favourites.remove(m.id).then((ok) => {
+        if (ok) log("favourites", "removed", { id: m.id });
+      });
+    } else if (
+      m.type === "renameFavourite" &&
+      typeof m.id === "string" &&
+      typeof m.name === "string"
+    ) {
+      favourites.rename(m.id, m.name).then((ok) => {
+        if (ok) log("favourites", "renamed", { id: m.id, name: m.name });
+      });
     } else if (m.type === "forceSync") {
       const all = registry.all();
       log("transport", "force-sync", { clients: all.length });
