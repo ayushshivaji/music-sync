@@ -44,7 +44,7 @@ Clients are **browser tabs** — no install, no native app. You visit `http://<h
 - Serves a tiny local web UI on the same port:
   - drag-drop files **or a folder** (recursed; non-audio entries skipped; sorted by filename) — each upload is **appended to a FIFO queue**. The first upload becomes the current track (paused); subsequent uploads queue behind it and auto-advance when the current one ends. Folder pick also available via an "Add folder…" button that uses `<input webkitdirectory>`.
   - **URL ingest** via `/upload-url` (POST `{url, playlistLimit?}`): host spawns `yt-dlp` (packaged in the Docker image alongside ffmpeg), downloads the best audio stream, transcodes to mp3, then runs the same decode → scheduler path as a regular upload. Works for YouTube and every other site yt-dlp supports. **Playlists are supported** — each track is decoded and enqueued as soon as yt-dlp finishes it, so the first track is playable while the rest are still downloading. The playlist ceiling is controlled by the `PLAYLIST_MAX` env var (default 50, hard-clamped server-side to 500); the host UI exposes a per-request override as a number input next to the URL field, preseeded from the server's default via the `/ctl` state broadcast.
-  - **Favourites** — a ★ toggle next to the URL field persists the typed URL to `${DATA_DIR}/favourites.json` on the host (default `/app/data/favourites.json`, mounted as a Docker volume so it survives container restarts). Each saved favourite shows in a panel with an inline-editable name, a ▶ button that re-submits it to `/upload-url` with the current "max" setting, and an × remove. Favourites are URL-only; file uploads aren't saved because the server-side file is ephemeral.
+  - **Favourites** — a ★ toggle next to the URL field persists the typed URL to `${DATA_DIR}/favourites.json` on the host (default `/app/data/favourites.json`, mounted as a Docker volume so it survives container restarts). Each saved favourite shows in a panel with an inline-editable name, a ▶ button that re-submits it to `/upload-url` with the current "max" setting, and an × remove. Favourites are URL-only; file uploads aren't saved because the server-side file is ephemeral. Additional ★ toggles live on the currently-loaded track and on each queue row whose track was URL-sourced, so you can favourite directly from playback context. For playlist-sourced tracks, the per-track URL (`webpage_url`) is captured — favouriting track 3 of a playlist stores *that video's* URL, not the playlist URL.
   - list of connected clients (by name / IP)
   - per-client **channel** dropdown (Left / Right / Mono / Mute)
   - per-client **volume** slider (0–100 %) applied client-side via a shared `GainNode` — does not rescale PCM or affect any other client
@@ -177,7 +177,7 @@ type CtlMsg =
 
 // /ctl  server → host-UI
 //   { type: "state", transport: TransportSnapshot, config: ConfigSnapshot, favourites: FavouriteSnapshot[], clients: ClientSnapshot[] }
-//   TransportSnapshot: { state, trackName, durationSec, positionSec, queue: Array<{name, durationSec}> }
+//   TransportSnapshot: { state, trackName, trackUrl, durationSec, positionSec, queue: Array<{name, durationSec, sourceUrl?}> }
 //   ConfigSnapshot:    { playlistDefault: number, playlistCeiling: number }   // host-UI initial values / clamp
 //   FavouriteSnapshot: { id, url, name }                                       // ordered newest-first
 //   ClientSnapshot:    { id, name, channel, remoteAddr, framesLate, sampleRate, volume }

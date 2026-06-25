@@ -71,6 +71,7 @@ function render(msg) {
   trackName.textContent = t.trackName
     ? `Loaded: ${t.trackName}  (${fmtTime(t.durationSec)})`
     : "No track loaded";
+  applyStarState(trackFavBtn, t.trackUrl, t.trackName);
   const pct = t.durationSec > 0 ? t.positionSec / t.durationSec : 0;
   progress.value = pct;
   timeEl.textContent = `${fmtTime(t.positionSec)} / ${fmtTime(t.durationSec)}`;
@@ -142,12 +143,39 @@ function buildFavLi() {
   return li;
 }
 
+function isFavourited(url) {
+  return !!url && currentFavourites.some((f) => f.url === url);
+}
+
+function favouriteIdFor(url) {
+  const match = url ? currentFavourites.find((f) => f.url === url) : null;
+  return match ? match.id : null;
+}
+
+function applyStarState(btn, url, suggestedName) {
+  if (!url) {
+    btn.style.display = "none";
+    return;
+  }
+  btn.style.display = "";
+  const starred = isFavourited(url);
+  btn.textContent = starred ? "★" : "☆";
+  btn.title = starred
+    ? "Remove from favourites"
+    : "Save to favourites";
+  btn.onclick = () => {
+    const id = favouriteIdFor(url);
+    if (id) send({ type: "removeFavourite", id });
+    else send({ type: "addFavourite", url, name: suggestedName });
+  };
+}
+
 function updateStarButton() {
   const url = (urlInput.value || "").trim();
-  const starred = !!url && currentFavourites.some((f) => f.url === url);
+  const starred = isFavourited(url);
   urlFavBtn.textContent = starred ? "★" : "☆";
   urlFavBtn.title = starred
-    ? "Already in favourites."
+    ? "Already saved — click to remove from favourites."
     : "Save this URL to favourites (persisted on the host). Does not play it.";
   urlFavBtn.disabled = !url;
 }
@@ -169,6 +197,8 @@ function renderQueue(queue) {
     const label = `${q.name}  (${fmtTime(q.durationSec)})`;
     const nameSpan = li.querySelector(".qname");
     if (nameSpan.textContent !== label) nameSpan.textContent = label;
+    const favBtn = li.querySelector("button.qfav");
+    applyStarState(favBtn, q.sourceUrl ?? "", q.name);
   }
 }
 
@@ -185,6 +215,14 @@ function buildQueueLi() {
   const nameSpan = document.createElement("span");
   nameSpan.className = "qname pos";
 
+  const favBtn = document.createElement("button");
+  favBtn.className = "qfav";
+  favBtn.textContent = "☆";
+  favBtn.draggable = false;
+  favBtn.addEventListener("mousedown", (e) => e.stopPropagation());
+  // onclick is set by applyStarState during render; it depends on the current
+  // favourites list and per-row URL, both of which live outside this closure.
+
   const removeBtn = document.createElement("button");
   removeBtn.className = "remove";
   removeBtn.textContent = "×";
@@ -197,7 +235,7 @@ function buildQueueLi() {
     send({ type: "removeQueued", index: idx });
   });
 
-  li.append(handle, nameSpan, removeBtn);
+  li.append(handle, nameSpan, favBtn, removeBtn);
   attachDragHandlers(li);
   return li;
 }
